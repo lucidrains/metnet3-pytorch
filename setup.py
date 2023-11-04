@@ -19,7 +19,7 @@ setup(
   ],
   install_requires=[
     'einops>=0.7.0',
-    'vit-pytorch',
+    'vit-pytorch>=1.6.3',
     'torch>=1.6',
   ],
   classifiers=[
