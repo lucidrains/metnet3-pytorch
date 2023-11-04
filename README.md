@@ -1,6 +1,6 @@
 ## MetNet-3 - Pytorch (wip)
 
-Implementation of MetNet-3, SOTA neural weather model out of Google Deepmind, in Pytorch
+Implementation of <a href="https://blog.research.google/2023/11/metnet-3-state-of-art-neural-weather.html">MetNet 3</a>, SOTA neural weather model out of Google Deepmind, in Pytorch
 
 ## Citations
 
