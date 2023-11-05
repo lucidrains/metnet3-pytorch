@@ -172,21 +172,22 @@ class Attention(Module):
     def __init__(
         self,
         dim,
+        heads = 32,
         dim_head = 32,
         dropout = 0.,
-        window_size = 7,
+        window_size = 8,
         num_registers = 1
     ):
         super().__init__()
         assert num_registers > 0
         assert (dim % dim_head) == 0, 'dimension should be divisible by dimension per head'
 
-        heads = dim // dim_head
+        dim_inner = dim_head * heads
         self.heads = heads
         self.scale = dim_head ** -0.5
 
         self.norm = nn.LayerNorm(dim)
-        self.to_qkv = nn.Linear(dim, dim * 3, bias = False)
+        self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
 
         self.q_norm = RMSNorm(dim_head, heads = heads)
         self.k_norm = RMSNorm(dim_head, heads = heads)
@@ -197,7 +198,7 @@ class Attention(Module):
         )
 
         self.to_out = nn.Sequential(
-            nn.Linear(dim, dim, bias = False),
+            nn.Linear(dim_inner, dim, bias = False),
             nn.Dropout(dropout)
         )
 
@@ -263,9 +264,10 @@ class MaxViT(Module):
         num_classes,
         dim,
         depth,
+        heads = 32,
         dim_head = 32,
         dim_conv_stem = None,
-        window_size = 7,
+        window_size = 8,
         mbconv_expansion_rate = 4,
         mbconv_shrinkage_rate = 0.25,
         dropout = 0.1,
@@ -316,9 +318,9 @@ class MaxViT(Module):
                     shrinkage_rate = mbconv_shrinkage_rate
                 )
 
-                block_attn = Attention(dim = layer_dim, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)
+                block_attn = Attention(dim = layer_dim, heads = heads, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)
 
-                grid_attn = Attention(dim = layer_dim, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)                
+                grid_attn = Attention(dim = layer_dim, heads = heads, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)                
 
                 register_tokens = nn.Parameter(torch.randn(num_register_tokens, layer_dim))
 
