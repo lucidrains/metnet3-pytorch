@@ -27,11 +27,15 @@ def unpack_one(x, ps, pattern):
 def cast_tuple(val, length = 1):
     return val if isinstance(val, tuple) else ((val,) * length)
 
+def safe_div(num, den, eps = 1e-10):
+    return num / den.clamp(min = eps)
+
 # loss scaling in section 4.3.2
 
 class LossScaleFunction(Function):
     @staticmethod
-    def forward(ctx, x):
+    def forward(ctx, x, eps):
+        ctx.eps = eps
         assert x.ndim == 4
         return x
 
@@ -39,16 +43,22 @@ class LossScaleFunction(Function):
     def backward(ctx, grads):
         num_channels = grads.shape[1]
 
-        weight = 1. / grads.norm(p = 2, keepdim = True, dim = (-1, -2))
-        l1_normed_weight = weight / weight.sum(keepdim = True, dim = 1)
+        safe_div_ = partial(safe_div, eps = ctx.eps)
+
+        weight = safe_div_(1., grads.norm(p = 2, keepdim = True, dim = (-1, -2)))
+        l1_normed_weight = safe_div_(weight, weight.sum(keepdim = True, dim = 1))
 
         scaled_grads = num_channels * l1_normed_weight * grads
 
-        return scaled_grads
+        return scaled_grads, None
 
 class LossScaler(Module):
+    def __init__(self, eps = 1e-5):
+        super().__init__()
+        self.eps = eps
+
     def forward(self, x):
-        return LossScaleFunction.apply(x)
+        return LossScaleFunction.apply(x, self.eps)
 
 # conditionable resnet block
 
