@@ -2,6 +2,8 @@ from functools import partial
 
 import torch
 from torch import nn, Tensor, einsum
+import torch.distributed as dist
+from torch.autograd import Function
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Sequential
 
@@ -24,6 +26,29 @@ def unpack_one(x, ps, pattern):
 
 def cast_tuple(val, length = 1):
     return val if isinstance(val, tuple) else ((val,) * length)
+
+# loss scaling in section 4.3.2
+
+class LossScaleFunction(Function):
+    @staticmethod
+    def forward(ctx, x):
+        assert x.ndim == 4
+        return x
+
+    @staticmethod
+    def backward(ctx, grads):
+        num_channels = grads.shape[1]
+
+        weight = 1. / grads.norm(p = 2, keepdim = True, dim = (-1, -2))
+        l1_normed_weight = weight / weight.sum(keepdim = True, dim = 1)
+
+        scaled_grads = num_channels * l1_normed_weight * grads
+
+        return scaled_grads
+
+class LossScaler(Module):
+    def forward(self, x):
+        return LossScaleFunction.apply(x)
 
 # conditionable resnet block
 
