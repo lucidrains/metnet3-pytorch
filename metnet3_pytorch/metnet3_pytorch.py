@@ -1,13 +1,7 @@
-import torch
-from torch import nn, Tensor
-from torch.nn import Module, ModuleList
-
-# heavily modified maxvit
-
 from functools import partial
 
 import torch
-from torch import nn, einsum
+from torch import nn, Tensor, einsum
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Sequential
 
@@ -30,6 +24,22 @@ def unpack_one(x, ps, pattern):
 
 def cast_tuple(val, length = 1):
     return val if isinstance(val, tuple) else ((val,) * length)
+
+# multi-headed rms normalization, for query / key normalized attention
+
+class RMSNorm(Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        heads
+    ):
+        super().__init__()
+        self.scale = dim ** 0.5
+        self.gamma = nn.Parameter(torch.ones(heads, 1, dim))
+
+    def forward(self, x):
+        return F.normalize(x, dim = -1) * self.scale * self.gamma
 
 # helper classes
 
@@ -132,11 +142,15 @@ class Attention(Module):
         assert num_registers > 0
         assert (dim % dim_head) == 0, 'dimension should be divisible by dimension per head'
 
-        self.heads = dim // dim_head
+        heads = dim // dim_head
+        self.heads = heads
         self.scale = dim_head ** -0.5
 
         self.norm = nn.LayerNorm(dim)
         self.to_qkv = nn.Linear(dim, dim * 3, bias = False)
+
+        self.q_norm = RMSNorm(dim_head, heads = heads)
+        self.k_norm = RMSNorm(dim_head, heads = heads)
 
         self.attend = nn.Sequential(
             nn.Softmax(dim = -1),
@@ -179,7 +193,7 @@ class Attention(Module):
 
         # scale
 
-        q = q * self.scale
+        q, k = self.q_norm(q), self.k_norm(k)
 
         # sim
 
@@ -348,4 +362,6 @@ class MaxViT(Module):
 # main MetNet3 module
 
 class MetNet3(Module):
-    raise NotImplementedError
+    def __init__(self):
+        super().__init__()
+        raise NotImplementedError
