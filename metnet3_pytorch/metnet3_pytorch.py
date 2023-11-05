@@ -103,7 +103,7 @@ class SqueezeExcitation(Module):
         self.gate = Sequential(
             Reduce('b c h w -> b c', 'mean'),
             nn.Linear(dim, hidden_dim, bias = False),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, dim, bias = False),
             nn.Sigmoid(),
             Rearrange('b c -> b c 1 1')
