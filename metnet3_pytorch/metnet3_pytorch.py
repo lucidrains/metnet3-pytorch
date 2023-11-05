@@ -41,19 +41,6 @@ class RMSNorm(Module):
     def forward(self, x):
         return F.normalize(x, dim = -1) * self.scale * self.gamma
 
-# helper classes
-
-def FeedForward(dim, mult = 4, dropout = 0.):
-    inner_dim = int(dim * mult)
-    return Sequential(
-        nn.LayerNorm(dim),
-        nn.Linear(dim, inner_dim),
-        nn.GELU(),
-        nn.Dropout(dropout),
-        nn.Linear(inner_dim, dim),
-        nn.Dropout(dropout)
-    )
-
 # MBConv
 
 class SqueezeExcitation(Module):
@@ -278,17 +265,15 @@ class MaxViT(Module):
                 )
 
                 block_attn = Attention(dim = layer_dim, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)
-                block_ff = FeedForward(dim = layer_dim, dropout = dropout)
 
-                grid_attn = Attention(dim = layer_dim, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)
-                grid_ff = FeedForward(dim = layer_dim, dropout = dropout)
+                grid_attn = Attention(dim = layer_dim, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)                
 
                 register_tokens = nn.Parameter(torch.randn(num_register_tokens, layer_dim))
 
                 self.layers.append(ModuleList([
                     conv,
-                    ModuleList([block_attn, block_ff]),
-                    ModuleList([grid_attn, grid_ff])
+                    block_attn,
+                    grid_attn
                 ]))
 
                 self.register_tokens.append(register_tokens)
@@ -306,7 +291,7 @@ class MaxViT(Module):
 
         x = self.conv_stem(x)
 
-        for (conv, (block_attn, block_ff), (grid_attn, grid_ff)), register_tokens in zip(self.layers, self.register_tokens):
+        for (conv, block_attn, grid_attn), register_tokens in zip(self.layers, self.register_tokens):
             x = conv(x)
 
             # block-like attention
@@ -323,7 +308,6 @@ class MaxViT(Module):
             x, register_ps = pack([r, x], 'b * d')
 
             x = block_attn(x) + x
-            x = block_ff(x) + x
 
             r, x = unpack(x, register_ps, 'b * d')
 
@@ -350,8 +334,6 @@ class MaxViT(Module):
             x = grid_attn(x) + x
 
             r, x = unpack(x, register_ps, 'b * d')
-
-            x = grid_ff(x) + x
 
             x = unpack_one(x, batch_ps, '* n d')
             x = unpack_one(x, window_ps, 'b x y * d')
