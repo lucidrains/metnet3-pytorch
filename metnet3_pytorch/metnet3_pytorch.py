@@ -62,6 +62,23 @@ class LossScaler(Module):
 
 # center crop
 
+class CenterPad(Module):
+    def __init__(self, target_dim):
+        super().__init__()
+        self.target_dim = target_dim
+
+    def forward(self, x):
+        target_dim = self.target_dim
+        *_, height, width = x.shape
+        assert target_dim >= height and target_dim >= width
+
+        height_pad = target_dim - height
+        width_pad = target_dim - width
+        left_height_pad = height_pad // 2
+        left_width_pad = width_pad // 2
+
+        return F.pad(x, (left_height_pad, height_pad - left_height_pad, left_width_pad, width_pad - left_width_pad), value = 0.)
+
 class CenterCrop(Module):
     def __init__(self, crop_dim):
         super().__init__()
