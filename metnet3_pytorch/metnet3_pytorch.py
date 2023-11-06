@@ -60,13 +60,43 @@ class LossScaler(Module):
     def forward(self, x):
         return LossScaleFunction.apply(x, self.eps)
 
+# center crop
+
+class CenterCrop(Module):
+    def __init__(self, crop_dim):
+        super().__init__()
+        self.crop_dim = crop_dim
+
+    def forward(self, x):
+        crop_dim = self.crop_dim
+        *_, height, width = x.shape
+        assert (height >= crop_dim) and (width >= crop_dim)
+
+        cropped_height_start_idx = (height - crop_dim) // 2
+        cropped_width_start_idx = (width - crop_dim) // 2
+
+        height_slice = slice(cropped_height_start_idx, cropped_height_start_idx + crop_dim)
+        width_slice = slice(cropped_width_start_idx, cropped_width_start_idx + crop_dim)
+        return x[..., height_slice, width_slice]
+
+# down and upsample
+
+# they use maxpool for downsample, and convtranspose2d for upsample
+# todo: figure out the 4x upsample from 4km to 1km
+
+Downsample2x = partial(nn.MaxPool2d, kernel_size = 2, stride = 2)
+
+def Upsample2x(dim, dim_out = None):
+    dim_out = default(dim_out, dim)
+    return nn.ConvTranspose2d(dim, dim_out, kernel_size = 2, stride = 2)
+
 # conditionable resnet block
 
 class Block(Module):
-    def __init__(self, dim, dim_out, groups = 8):
+    def __init__(self, dim, dim_out):
         super().__init__()
         self.proj = nn.Conv2d(dim, dim_out, 3, padding = 1)
-        self.norm = nn.GroupNorm(groups, dim_out)
+        self.norm = ChanLayerNorm(dim_out)
         self.act = nn.ReLU()
 
     def forward(self, x, scale_shift = None):
@@ -127,6 +157,20 @@ class RMSNorm(Module):
 
     def forward(self, x):
         return F.normalize(x, dim = -1) * self.scale * self.gamma
+
+# they use layernorms after the conv in the resnet blocks for some reason
+
+class ChanLayerNorm(nn.Module):
+    def __init__(self, dim, eps = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
+        self.b = nn.Parameter(torch.zeros(1, dim, 1, 1))
+
+    def forward(self, x):
+        var = torch.var(x, dim = 1, unbiased = False, keepdim = True)
+        mean = torch.mean(x, dim = 1, keepdim = True)
+        return (x - mean) * var.clamp(min = self.eps).rsqrt() * self.g + self.b
 
 # MBConv
 
@@ -433,6 +477,26 @@ class MaxViT(Module):
 # main MetNet3 module
 
 class MetNet3(Module):
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        dim = 512,
+        num_lead_times = 722,
+        lead_time_embed_dim = 32
+    ):
         super().__init__()
-        raise NotImplementedError
+        self.lead_time_embedding = nn.Embedding(num_lead_times, lead_time_embed_dim)
+
+    def forward(
+        self,
+        lead_times,
+        sparse_inputs,
+        dense_inputs_2496,
+        dense_inputs_4996,
+        surface_targest = None,
+        hrrr_targets = None,
+        precipitation_targets = None
+    ):
+        time_embeds = self.lead_time_embedding(lead_times)
+
+        return None
