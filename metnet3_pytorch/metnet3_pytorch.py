@@ -10,6 +10,9 @@ from torch.nn import Module, ModuleList, Sequential
 from einops import rearrange, repeat, reduce, pack, unpack
 from einops.layers.torch import Rearrange, Reduce
 
+from beartype import beartype
+from beartype.typing import Tuple, Union, List
+
 # helpers
 
 def exists(val):
@@ -29,6 +32,12 @@ def cast_tuple(val, length = 1):
 
 def safe_div(num, den, eps = 1e-10):
     return num / den.clamp(min = eps)
+
+# prepare batch norm in maxvit for distributed training
+
+def MaybeSyncBatchnorm2d(is_distributed = None):
+    is_distributed = default(is_distributed, dist.is_initialized() and dist.get_world_size() > 1)
+    return nn.SyncBatchNorm if is_distributed else nn.BatchNorm2d
 
 # loss scaling in section 4.3.2
 
@@ -245,16 +254,18 @@ def MBConv(
     hidden_dim = int(expansion_rate * dim_out)
     stride = 2 if downsample else 1
 
+    batchnorm_klass = MaybeSyncBatchnorm2d()
+
     net = Sequential(
         nn.Conv2d(dim_in, hidden_dim, 1),
-        nn.BatchNorm2d(hidden_dim),
+        batchnorm_klass(hidden_dim),
         nn.GELU(),
         nn.Conv2d(hidden_dim, hidden_dim, 3, stride = stride, padding = 1, groups = hidden_dim),
-        nn.BatchNorm2d(hidden_dim),
+        batchnorm_klass(hidden_dim),
         nn.GELU(),
         SqueezeExcitation(hidden_dim, shrinkage_rate = shrinkage_rate),
         nn.Conv2d(hidden_dim, dim_out, 1),
-        nn.BatchNorm2d(dim_out)
+        batchnorm_klass(dim_out)
     )
 
     if dim_in == dim_out and not downsample:

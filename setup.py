@@ -18,6 +18,7 @@ setup(
     'weather forecasting'
   ],
   install_requires=[
+    'beartype',
     'einops>=0.7.0',
     'torch>=1.6',
   ],
