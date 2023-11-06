@@ -11,7 +11,7 @@ from einops import rearrange, repeat, reduce, pack, unpack
 from einops.layers.torch import Rearrange, Reduce
 
 from beartype import beartype
-from beartype.typing import Tuple, Union, List
+from beartype.typing import Tuple, Union, List, Optional
 
 # helpers
 
@@ -279,6 +279,7 @@ class Attention(Module):
     def __init__(
         self,
         dim,
+        cond_dim = None,
         heads = 32,
         dim_head = 32,
         dropout = 0.,
@@ -293,7 +294,20 @@ class Attention(Module):
         self.heads = heads
         self.scale = dim_head ** -0.5
 
-        self.norm = nn.LayerNorm(dim)
+        self.has_cond = exists(cond_dim)
+
+        self.film = None
+
+        if self.has_cond:
+            self.film = Sequential(
+                nn.Linear(cond_dim, dim * 2),
+                nn.SiLU(),
+                nn.Linear(dim * 2, dim * 2),
+                Rearrange('b (r d) -> r b 1 d', r = 2)
+            )
+
+        self.norm = nn.LayerNorm(dim, elementwise_affine = not self.has_cond)
+
         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
 
         self.q_norm = RMSNorm(dim_head, heads = heads)
@@ -325,10 +339,22 @@ class Attention(Module):
         rel_pos_indices = F.pad(rel_pos_indices, (num_registers, 0, num_registers, 0), value = num_rel_pos_bias)
         self.register_buffer('rel_pos_indices', rel_pos_indices, persistent = False)
 
-    def forward(self, x):
+    def forward(
+        self,
+        x: Tensor,
+        cond: Optional[Tensor] = None
+    ):
         device, h, bias_indices = x.device, self.heads, self.rel_pos_indices
 
         x = self.norm(x)
+
+        # conditioning
+
+        if exists(self.film):
+            assert exists(cond)
+
+            gamma, beta = self.film(cond)
+            x = x * gamma + beta
 
         # project for queries, keys, values
 
@@ -371,6 +397,7 @@ class MaxViT(Module):
         num_classes,
         dim,
         depth,
+        cond_dim = 32,   # for conditioniong on lead time embedding
         heads = 32,
         dim_head = 32,
         dim_conv_stem = None,
@@ -384,6 +411,8 @@ class MaxViT(Module):
         super().__init__()
         assert isinstance(depth, tuple), 'depth needs to be tuple if integers indicating number of transformer blocks at that stage'
         assert num_register_tokens > 0
+
+        self.cond_dim = cond_dim
 
         # convolutional stem
 
@@ -425,9 +454,9 @@ class MaxViT(Module):
                     shrinkage_rate = mbconv_shrinkage_rate
                 )
 
-                block_attn = Attention(dim = layer_dim, heads = heads, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)
+                block_attn = Attention(dim = layer_dim, cond_dim = cond_dim, heads = heads, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)
 
-                grid_attn = Attention(dim = layer_dim, heads = heads, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)                
+                grid_attn = Attention(dim = layer_dim, cond_dim = cond_dim, heads = heads, dim_head = dim_head, dropout = dropout, window_size = window_size, num_registers = num_register_tokens)
 
                 register_tokens = nn.Parameter(torch.randn(num_register_tokens, layer_dim))
 
@@ -447,7 +476,13 @@ class MaxViT(Module):
             nn.Linear(dims[-1], num_classes)
         )
 
-    def forward(self, x):
+    def forward(
+        self,
+        x: Tensor,
+        cond: Tensor
+    ):
+        assert cond.shape == (x.shape[0], self.cond_dim)
+
         b, w = x.shape[0], self.window_size
 
         x = self.conv_stem(x)
@@ -468,7 +503,7 @@ class MaxViT(Module):
             x, batch_ps  = pack_one(x, '* n d')
             x, register_ps = pack([r, x], 'b * d')
 
-            x = block_attn(x) + x
+            x = block_attn(x, cond = cond) + x
 
             r, x = unpack(x, register_ps, 'b * d')
 
@@ -492,7 +527,7 @@ class MaxViT(Module):
             x, batch_ps  = pack_one(x, '* n d')
             x, register_ps = pack([r, x], 'b * d')
 
-            x = grid_attn(x) + x
+            x = grid_attn(x, cond = cond) + x
 
             r, x = unpack(x, register_ps, 'b * d')
 
