@@ -73,8 +73,9 @@ surface_target, hrrr_target, precipitation_target = metnet3(
 ## Todo
 
 - [x] figure out all the cross entropy and MSE losses
+- [x] auto-handle normalization across all the channels of the HRRR by tracking a running mean and variance of targets during training (using sync batchnorm as hack)
 
-- [ ] auto-handle normalization across all the channels of the HRRR by tracking a running mean and variance of targets during training, as well as allow researcher to pass in their own normalization variables
+- [ ] allow researcher to pass in their own normalization variables for HRRR
 - [ ] figure out the topological embedding, consult a neural weather researcher
 
 ## Citations

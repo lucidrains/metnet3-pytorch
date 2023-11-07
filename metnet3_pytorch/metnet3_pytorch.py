@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from functools import partial
 from collections import namedtuple
 
@@ -39,6 +40,21 @@ def safe_div(num, den, eps = 1e-10):
 def MaybeSyncBatchnorm2d(is_distributed = None):
     is_distributed = default(is_distributed, dist.is_initialized() and dist.get_world_size() > 1)
     return nn.SyncBatchNorm if is_distributed else nn.BatchNorm2d
+
+@contextmanager
+def freeze_batchnorm(bn):
+    assert not exists(next(bn.parameters(), None))
+
+    was_training = bn.training
+    was_tracking_stats = bn.track_running_stats # in some versions of pytorch, running mean and variance still gets updated even in eval mode it seems..
+
+    bn.eval()
+    bn.track_running_stats = False
+
+    yield bn
+
+    bn.train(was_training)
+    bn.track_running_stats = was_tracking_stats
 
 # loss scaling in section 4.3.2
 
@@ -686,6 +702,8 @@ class MetNet3(Module):
             nn.Conv2d(dim, precipitation_target_channels, 1)
         )
 
+        self.batchnorm_hrrr = MaybeSyncBatchnorm2d()(hrrr_target_channels, affine = False)
+
         self.mse_loss_scaler = LossScaler()
 
     def forward(
@@ -779,9 +797,18 @@ class MetNet3(Module):
 
         # calculate HRRR mse loss
 
-        hrrr_pred = self.mse_loss_scaler(hrrr_pred)
+        # use a batchnorm to normalize each channel to mean zero and unit variance
 
-        hrrr_loss = F.mse_loss(hrrr_pred, hrrr_target)
+        normed_hrrr_target = self.batchnorm_hrrr(hrrr_target)
+
+        with freeze_batchnorm(self.batchnorm_hrrr) as frozen_batchnorm:
+            normed_hrrr_pred = frozen_batchnorm(hrrr_pred)
+
+        # proposed loss gradient rescaler from section 4.3.2
+
+        normed_hrrr_pred = self.mse_loss_scaler(normed_hrrr_pred)
+
+        hrrr_loss = F.mse_loss(normed_hrrr_pred, normed_hrrr_target)
 
         # total loss
 
