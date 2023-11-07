@@ -31,9 +31,9 @@ metnet3 = MetNet3(
     sparse_input_2496_channels = 8,
     dense_input_2496_channels = 8,
     dense_input_4996_channels = 8,
-    surface_target_channels = 4,
-    hrrr_target_channels = 4,
-    precipitation_target_channels = 4
+    precipitation_target_channels = 2,
+    surface_target_channels = 6,
+    hrrr_target_channels = 617,
 )
 
 lead_times = torch.randint(0, 722, (2,))
@@ -41,17 +41,40 @@ sparse_input_2496 = torch.randn((2, 8, 624, 624))
 dense_input_2496 = torch.randn((2, 8, 624, 624))
 dense_input_4996 = torch.randn((2, 8, 624, 624))
 
+precipitation_target = torch.randint(0, 2, (2, 512, 512))
+surface_target = torch.randint(0, 6, (2, 128, 128))
+hrrr_target = torch.randn(2, 617, 128, 128)
+
+total_loss, loss_breakdown = metnet3(
+    lead_times = lead_times,
+    sparse_input_2496 = sparse_input_2496,
+    dense_input_2496 = dense_input_2496,
+    dense_input_4996 = dense_input_4996,
+    precipitation_target = precipitation_target,
+    surface_target = surface_target,
+    hrrr_target = hrrr_target
+)
+
+total_loss.backward()
+
+# after much training from above, you can predict as follows
+
+metnet3.eval()
+
 surface_target, hrrr_target, precipitation_target = metnet3(
     lead_times = lead_times,
     sparse_input_2496 = sparse_input_2496,
     dense_input_2496 = dense_input_2496,
     dense_input_4996 = dense_input_4996
 )
+
 ```
 
 ## Todo
 
-- [ ] figure out all the cross entropy and MSE losses, and handle the normalization of MSE losses specifically as mentioned in the paper, utilizing sync batchnorm for tracking running mean and variance
+- [x] figure out all the cross entropy and MSE losses
+
+- [ ] auto-handle normalization across all the channels of the HRRR by tracking a running mean and variance of targets during training, as well as allow researcher to pass in their own normalization variables
 - [ ] figure out the topological embedding, consult a neural weather researcher
 
 ## Citations

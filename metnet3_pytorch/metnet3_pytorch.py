@@ -200,7 +200,6 @@ class ResnetBlocks(Module):
         for block in self.blocks:
             x = block(x, cond = cond)
 
-        print(x.shape)
         return x
 
 # multi-headed rms normalization, for query / key normalized attention
@@ -582,9 +581,9 @@ class MetNet3(Module):
         dense_input_2496_channels = 8,
         dense_input_4996_channels = 8,
         surface_and_hrrr_target_spatial_size = 128,
-        surface_target_channels = 4,
-        hrrr_target_channels = 4,
-        precipitation_target_channels = 4,
+        surface_target_channels = 6,
+        hrrr_target_channels = 617,
+        precipitation_target_channels = 2,
         crop_size_post_16km = 48,
         resnet_block_depth = 2,
     ):
@@ -594,6 +593,10 @@ class MetNet3(Module):
         self.dense_input_4996_shape = (dense_input_4996_channels, input_spatial_size, input_spatial_size)
 
         self.surface_and_hrrr_target_spatial_size = surface_and_hrrr_target_spatial_size
+
+        self.surface_target_shape = ((self.surface_and_hrrr_target_spatial_size,) * 2)
+        self.hrrr_target_shape = (hrrr_target_channels, *self.surface_target_shape)
+        self.precipitation_target_shape = (surface_and_hrrr_target_spatial_size * 4,) * 2
 
         self.lead_time_embedding = nn.Embedding(num_lead_times, lead_time_embed_dim)
 
@@ -683,6 +686,8 @@ class MetNet3(Module):
             nn.Conv2d(dim, precipitation_target_channels, 1)
         )
 
+        self.mse_loss_scaler = LossScaler()
+
     def forward(
         self,
         lead_times,
@@ -693,7 +698,9 @@ class MetNet3(Module):
         hrrr_target = None,
         precipitation_target = None
     ):
-        assert lead_times.shape[0] == sparse_input_2496.shape[0] == dense_input_2496.shape[0] == dense_input_4996.shape[0], 'batch size across all inputs must be the same'
+        batch = lead_times.shape[0]
+
+        assert batch == sparse_input_2496.shape[0] == dense_input_2496.shape[0] == dense_input_4996.shape[0], 'batch size across all inputs must be the same'
         
         assert sparse_input_2496.shape[1:] == self.sparse_input_2496_shape
         assert dense_input_2496.shape[1:] == self.dense_input_2496_shape
@@ -744,4 +751,42 @@ class MetNet3(Module):
 
         precipitation_pred = self.to_precipitation_pred(x)
 
-        return Predictions(surface_pred, hrrr_pred, precipitation_pred)
+        exist_targets = [exists(target) for target in (surface_target, hrrr_target, precipitation_target)]
+
+        pred =  Predictions(surface_pred, hrrr_pred, precipitation_pred)
+
+        if not any(exist_targets):
+            return pred
+
+        assert all(exist_targets), 'all targets must be passed in for loss calculation'
+
+        assert batch == surface_target.shape[0] == hrrr_target.shape[0] == precipitation_target.shape[0]
+
+        assert surface_target.shape[1:] == self.surface_target_shape
+        assert hrrr_target.shape[1:] == self.hrrr_target_shape
+        assert precipitation_target.shape[1:] == self.precipitation_target_shape
+
+        # calculate categorical losses
+
+        surface_pred = rearrange(surface_pred, '... h w -> ... (h w)')
+        precipitation_pred = rearrange(precipitation_pred, '... h w -> ... (h w)')
+
+        surface_target = rearrange(surface_target, '... h w -> ... (h w)')
+        precipitation_target = rearrange(precipitation_target, '... h w -> ... (h w)')
+
+        surface_loss = F.cross_entropy(surface_pred, surface_target)
+        precipition_loss = F.cross_entropy(precipitation_pred, precipitation_target)
+
+        # calculate HRRR mse loss
+
+        hrrr_pred = self.mse_loss_scaler(hrrr_pred)
+
+        hrrr_loss = F.mse_loss(hrrr_pred, hrrr_target)
+
+        # total loss
+
+        total_loss = hrrr_loss + precipition_loss + surface_loss
+
+        loss_breakdown = LossBreakdown(surface_loss, hrrr_loss, precipition_loss)
+
+        return total_loss, loss_breakdown
