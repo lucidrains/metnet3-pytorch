@@ -49,6 +49,11 @@ surface_target, hrrr_target, precipitation_target = metnet3(
 )
 ```
 
+## Todo
+
+- [ ] figure out all the cross entropy and MSE losses, and handle the normalization of MSE losses specifically as mentioned in the paper, utilizing sync batchnorm for tracking running mean and variance
+- [ ] figure out the topological embedding, consult a neural weather researcher
+
 ## Citations
 
 ```bibtex
