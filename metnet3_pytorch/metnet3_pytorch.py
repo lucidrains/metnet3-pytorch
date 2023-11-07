@@ -1,4 +1,5 @@
 from functools import partial
+from collections import namedtuple
 
 import torch
 from torch import nn, Tensor, einsum
@@ -137,36 +138,70 @@ class Block(Module):
         return x
 
 class ResnetBlock(Module):
-    def __init__(self, dim, dim_out, *, time_emb_dim = None, groups = 8):
+    def __init__(
+        self,
+        dim,
+        dim_out = None,
+        *,
+        cond_dim = None
+    ):
         super().__init__()
+        dim_out = default(dim_out, dim)
         self.mlp = None
 
-        if exists(time_emb_dim):
+        if exists(cond_dim):
             self.mlp = Sequential(
                 nn.ReLU(),
-                nn.Linear(time_emb_dim, dim_out * 2)
+                nn.Linear(cond_dim, dim_out * 2)
             )
 
-        self.block1 = Block(dim, dim_out, groups = groups)
-        self.block2 = Block(dim_out, dim_out, groups = groups)
+        self.block1 = Block(dim, dim_out)
+        self.block2 = Block(dim_out, dim_out)
         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
-    def forward(self, x, time_emb = None):
+    def forward(self, x, cond = None):
 
         scale_shift = None
 
-        assert not (exists(self.mlp) ^ exists(time_emb))
+        assert not (exists(self.mlp) ^ exists(cond))
 
-        if exists(self.mlp) and exists(time_emb):
-            time_emb = self.mlp(time_emb)
-            time_emb = rearrange(time_emb, 'b c -> b c 1 1')
-            scale_shift = time_emb.chunk(2, dim = 1)
+        if exists(self.mlp) and exists(cond):
+            cond = self.mlp(cond)
+            cond = rearrange(cond, 'b c -> b c 1 1')
+            scale_shift = cond.chunk(2, dim = 1)
 
         h = self.block1(x, scale_shift = scale_shift)
 
         h = self.block2(h)
 
         return h + self.res_conv(x)
+
+class ResnetBlocks(Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        dim_in = None,
+        depth = 1,
+        cond_dim = None
+    ):
+        super().__init__()
+        curr_dim = default(dim_in, dim)
+
+        blocks = []
+        for _ in range(depth):
+            blocks.append(ResnetBlock(dim = curr_dim, dim_out = dim, cond_dim = cond_dim))
+            curr_dim = dim
+
+        self.blocks = ModuleList(blocks)
+
+    def forward(self, x, cond = None):
+
+        for block in self.blocks:
+            x = block(x, cond = cond)
+
+        print(x.shape)
+        return x
 
 # multi-headed rms normalization, for query / key normalized attention
 
@@ -394,41 +429,28 @@ class MaxViT(Module):
     def __init__(
         self,
         *,
-        num_classes,
         dim,
         depth,
         cond_dim = 32,   # for conditioniong on lead time embedding
         heads = 32,
         dim_head = 32,
-        dim_conv_stem = None,
         window_size = 8,
         mbconv_expansion_rate = 4,
         mbconv_shrinkage_rate = 0.25,
         dropout = 0.1,
-        channels = 3,
         num_register_tokens = 4
     ):
         super().__init__()
-        assert isinstance(depth, tuple), 'depth needs to be tuple if integers indicating number of transformer blocks at that stage'
+        depth = (depth,) if isinstance(depth, int) else depth
         assert num_register_tokens > 0
 
         self.cond_dim = cond_dim
-
-        # convolutional stem
-
-        dim_conv_stem = default(dim_conv_stem, dim)
-
-        self.conv_stem = Sequential(
-            nn.Conv2d(channels, dim_conv_stem, 3, stride = 2, padding = 1),
-            nn.Conv2d(dim_conv_stem, dim_conv_stem, 3, padding = 1)
-        )
 
         # variables
 
         num_stages = len(depth)
 
         dims = tuple(map(lambda i: (2 ** i) * dim, range(num_stages)))
-        dims = (dim_conv_stem, *dims)
         dim_pairs = tuple(zip(dims[:-1], dims[1:]))
 
         self.layers = nn.ModuleList([])
@@ -468,14 +490,6 @@ class MaxViT(Module):
 
                 self.register_tokens.append(register_tokens)
 
-        # mlp head out
-
-        self.mlp_head = nn.Sequential(
-            Reduce('b d h w -> b d', 'mean'),
-            nn.LayerNorm(dims[-1]),
-            nn.Linear(dims[-1], num_classes)
-        )
-
     def forward(
         self,
         x: Tensor,
@@ -484,8 +498,6 @@ class MaxViT(Module):
         assert cond.shape == (x.shape[0], self.cond_dim)
 
         b, w = x.shape[0], self.window_size
-
-        x = self.conv_stem(x)
 
         for (conv, block_attn, grid_attn), register_tokens in zip(self.layers, self.register_tokens):
             x = conv(x)
@@ -535,9 +547,21 @@ class MaxViT(Module):
             x = unpack_one(x, window_ps, 'b x y * d')
             x = rearrange(x, 'b x y w1 w2 d -> b d (w1 x) (w2 y)')
 
-        return self.mlp_head(x)
+        return x
 
 # main MetNet3 module
+
+Predictions = namedtuple('Predictions', [
+    'surface',
+    'hrrr',
+    'precipitation'
+])
+
+LossBreakdown = namedtuple('LossBreakdown', [
+    'surface',
+    'hrrr',
+    'precipitation'
+])
 
 class MetNet3(Module):
     def __init__(
@@ -545,21 +569,179 @@ class MetNet3(Module):
         *,
         dim = 512,
         num_lead_times = 722,
-        lead_time_embed_dim = 32
+        lead_time_embed_dim = 32,
+        input_spatial_size = 624,
+        attn_depth = 12,
+        attn_dim_head = 64,
+        attn_heads = 32,
+        attn_dropout = 0.1,
+        vit_window_size = 8,
+        vit_mbconv_expansion_rate = 4,
+        vit_mbconv_shrinkage_rate = 0.25,
+        sparse_input_2496_channels = 8,
+        dense_input_2496_channels = 8,
+        dense_input_4996_channels = 8,
+        surface_and_hrrr_target_spatial_size = 128,
+        surface_target_channels = 4,
+        hrrr_target_channels = 4,
+        precipitation_target_channels = 4,
+        crop_size_post_16km = 48,
+        resnet_block_depth = 2,
     ):
         super().__init__()
+        self.sparse_input_2496_shape = (sparse_input_2496_channels, input_spatial_size, input_spatial_size)
+        self.dense_input_2496_shape = (dense_input_2496_channels, input_spatial_size, input_spatial_size)
+        self.dense_input_4996_shape = (dense_input_4996_channels, input_spatial_size, input_spatial_size)
+
+        self.surface_and_hrrr_target_spatial_size = surface_and_hrrr_target_spatial_size
+
         self.lead_time_embedding = nn.Embedding(num_lead_times, lead_time_embed_dim)
+
+        dim_in_4km = sparse_input_2496_channels + dense_input_2496_channels
+
+        self.to_skip_connect_4km = CenterCrop(crop_size_post_16km * 4)
+
+        self.resnet_blocks_down_4km = ResnetBlocks(
+            dim = dim,
+            dim_in = dim_in_4km,
+            cond_dim = lead_time_embed_dim,
+            depth = resnet_block_depth
+        )
+
+        self.downsample_and_pad_to_8km = Sequential(
+            Downsample2x(),
+            CenterPad(input_spatial_size)
+        )
+
+        dim_in_8km = dense_input_4996_channels + dim
+
+        self.resnet_blocks_down_8km = ResnetBlocks(
+            dim = dim,
+            dim_in = dim_in_8km,
+            cond_dim = lead_time_embed_dim,
+            depth = resnet_block_depth
+        )
+
+        self.downsample_to_16km = Downsample2x()
+
+        self.vit = MaxViT(
+            dim = dim,
+            depth = attn_depth,
+            dim_head = attn_dim_head,
+            heads = attn_heads,
+            dropout = attn_dropout,
+            cond_dim = lead_time_embed_dim,
+            window_size = vit_window_size,
+            mbconv_expansion_rate = vit_mbconv_expansion_rate,
+            mbconv_shrinkage_rate = vit_mbconv_shrinkage_rate,
+        )
+
+        self.crop_post_16km = CenterCrop(crop_size_post_16km)
+
+        self.upsample_16km_to_8km = Upsample2x(dim)
+
+        self.to_skip_connect_8km = CenterCrop(crop_size_post_16km * 2)
+
+        self.resnet_blocks_up_8km = ResnetBlocks(
+            dim = dim,
+            dim_in = dim + dim_in_8km,
+            cond_dim = lead_time_embed_dim,
+            depth = resnet_block_depth
+        )
+
+        self.upsample_8km_to_4km = Upsample2x(dim)
+
+        self.crop_post_4km = CenterCrop(surface_and_hrrr_target_spatial_size)
+
+        self.resnet_blocks_up_4km = ResnetBlocks(
+            dim = dim,
+            dim_in = dim + dim_in_4km,
+            cond_dim = lead_time_embed_dim,
+            depth = resnet_block_depth
+        )
+
+        self.upsample_4x_to_1km = nn.ConvTranspose2d(dim, dim, kernel_size = 4, stride = 4)
+
+        self.resnet_blocks_up_1km = ResnetBlocks(
+            dim = dim,
+            depth = resnet_block_depth,
+            cond_dim = lead_time_embed_dim
+        )
+
+        self.to_surface_pred = Sequential(
+            ChanLayerNorm(dim),
+            nn.Conv2d(dim, surface_target_channels, 1)
+        )
+
+        self.to_hrrr_pred = Sequential(
+            ChanLayerNorm(dim),
+            nn.Conv2d(dim, hrrr_target_channels, 1)
+        )
+
+        self.to_precipitation_pred = Sequential(
+            ChanLayerNorm(dim),
+            nn.Conv2d(dim, precipitation_target_channels, 1)
+        )
 
     def forward(
         self,
         lead_times,
-        sparse_inputs,
-        dense_inputs_2496,
-        dense_inputs_4996,
-        surface_targest = None,
-        hrrr_targets = None,
-        precipitation_targets = None
+        sparse_input_2496,
+        dense_input_2496,
+        dense_input_4996,
+        surface_target = None,
+        hrrr_target = None,
+        precipitation_target = None
     ):
-        time_embeds = self.lead_time_embedding(lead_times)
+        assert lead_times.shape[0] == sparse_input_2496.shape[0] == dense_input_2496.shape[0] == dense_input_4996.shape[0], 'batch size across all inputs must be the same'
+        
+        assert sparse_input_2496.shape[1:] == self.sparse_input_2496_shape
+        assert dense_input_2496.shape[1:] == self.dense_input_2496_shape
+        assert dense_input_4996.shape[1:] == self.dense_input_4996_shape
 
-        return None
+        cond = self.lead_time_embedding(lead_times)
+
+        x = torch.cat((sparse_input_2496, dense_input_2496), dim = 1)
+
+        skip_connect_4km = self.to_skip_connect_4km(x)
+
+        x = self.resnet_blocks_down_4km(x, cond = cond)
+
+        x = self.downsample_and_pad_to_8km(x)
+
+        x = torch.cat((dense_input_4996, x), dim = 1)
+
+        skip_connect_8km = self.to_skip_connect_8km(x)
+
+        x = self.resnet_blocks_down_8km(x, cond = cond)
+
+        x = self.downsample_to_16km(x)
+
+        x = self.vit(x, cond = cond)
+
+        x = self.crop_post_16km(x)
+
+        x = self.upsample_16km_to_8km(x)
+
+        x = torch.cat((skip_connect_8km, x), dim = 1)
+
+        x = self.resnet_blocks_up_8km(x, cond = cond)
+
+        x = self.upsample_8km_to_4km(x)
+
+        x = torch.cat((skip_connect_4km, x), dim = 1)
+
+        x = self.resnet_blocks_up_4km(x, cond = cond)
+
+        x = self.crop_post_4km(x)
+
+        surface_pred = self.to_surface_pred(x)
+        hrrr_pred = self.to_hrrr_pred(x)
+
+        x = self.upsample_4x_to_1km(x)
+
+        x = self.resnet_blocks_up_1km(x, cond = cond)
+
+        precipitation_pred = self.to_precipitation_pred(x)
+
+        return Predictions(surface_pred, hrrr_pred, precipitation_pred)
