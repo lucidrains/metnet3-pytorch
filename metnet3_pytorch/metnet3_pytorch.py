@@ -599,6 +599,7 @@ class MetNet3(Module):
         surface_and_hrrr_target_spatial_size = 128,
         surface_target_channels = 6,
         hrrr_target_channels = 617,
+        hrrr_norm_statistics: Optional[Tensor] = None,
         precipitation_target_channels = 2,
         crop_size_post_16km = 48,
         resnet_block_depth = 2,
@@ -702,7 +703,13 @@ class MetNet3(Module):
             nn.Conv2d(dim, precipitation_target_channels, 1)
         )
 
-        self.batchnorm_hrrr = MaybeSyncBatchnorm2d()(hrrr_target_channels, affine = False)
+        self.has_hrrr_norm_statistics = exists(hrrr_norm_statistics)
+
+        if self.has_hrrr_norm_statistics:
+            assert hrrr_norm_statistics.shape == (2, hrrr_target_channels), f'normalization statistics must be of shape (2, {normed_hrrr_target}), containing mean and variance of each target calculated from the dataset'
+            self.register_buffer('hrrr_norm_statistics', hrrr_norm_statistics)
+        else:
+            self.batchnorm_hrrr = MaybeSyncBatchnorm2d()(hrrr_target_channels, affine = False)
 
         self.mse_loss_scaler = LossScaler()
 
@@ -797,14 +804,23 @@ class MetNet3(Module):
 
         # calculate HRRR mse loss
 
-        # use a batchnorm to normalize each channel to mean zero and unit variance
+        if self.has_hrrr_norm_statistics:
+            mean, variance = self.hrrr_norm_statistics
+            mean = rearrange(mean, 'c -> c 1 1')
+            variance = rearrange(variance, 'c -> c 1 1')
+            inv_std = variance.clamp(min = 1e-5).rsqrt()
 
-        if self.training:
-            _ = self.batchnorm_hrrr(hrrr_target)
+            normed_hrrr_target = (hrrr_target - mean) * inv_std
+            normed_hrrr_pred = (hrrr_pred - mean) * inv_std
+        else:
+            # use a batchnorm to normalize each channel to mean zero and unit variance
 
-        with freeze_batchnorm(self.batchnorm_hrrr) as frozen_batchnorm:
-            normed_hrrr_pred = frozen_batchnorm(hrrr_pred)
-            normed_hrrr_target = frozen_batchnorm(hrrr_target)
+            if self.training:
+                _ = self.batchnorm_hrrr(hrrr_target)
+
+            with freeze_batchnorm(self.batchnorm_hrrr) as frozen_batchnorm:
+                normed_hrrr_pred = frozen_batchnorm(hrrr_pred)
+                normed_hrrr_target = frozen_batchnorm(hrrr_target)
 
         # proposed loss gradient rescaler from section 4.3.2
 
