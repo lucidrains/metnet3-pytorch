@@ -799,7 +799,8 @@ class MetNet3(Module):
 
         # use a batchnorm to normalize each channel to mean zero and unit variance
 
-        _ = self.batchnorm_hrrr(hrrr_target)
+        if self.training:
+            _ = self.batchnorm_hrrr(hrrr_target)
 
         with freeze_batchnorm(self.batchnorm_hrrr) as frozen_batchnorm:
             normed_hrrr_pred = frozen_batchnorm(hrrr_pred)
