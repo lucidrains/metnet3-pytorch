@@ -799,10 +799,10 @@ class MetNet3(Module):
 
         # use a batchnorm to normalize each channel to mean zero and unit variance
 
-        normed_hrrr_target = self.batchnorm_hrrr(hrrr_target)
-
         with freeze_batchnorm(self.batchnorm_hrrr) as frozen_batchnorm:
             normed_hrrr_pred = frozen_batchnorm(hrrr_pred)
+
+        normed_hrrr_target = self.batchnorm_hrrr(hrrr_target)
 
         # proposed loss gradient rescaler from section 4.3.2
 
