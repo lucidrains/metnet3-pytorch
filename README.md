@@ -28,9 +28,9 @@ metnet3 = MetNet3(
     lead_time_embed_dim = 32,
     input_spatial_size = 624,
     attn_dim_head = 8,
-    sparse_input_2496_channels = 8,
-    dense_input_2496_channels = 8,
-    dense_input_4996_channels = 8,
+    hrrr_channels = 617,
+    input_2496_channels = 2 + 14 + 1 + 2 + 20,
+    input_4996_channels = 16 + 1,
     precipitation_target_bins = dict(
         mrms_rate = 512,
         mrms_accumulation = 512,
@@ -43,16 +43,16 @@ metnet3 = MetNet3(
         omo_wind_component_y = 256,
         omo_wind_direction = 180
     ),
-    hrrr_loss_weight = 10,
-    hrrr_target_channels = 617
+    hrrr_loss_weight = 10
 )
 
 # inputs
 
 lead_times = torch.randint(0, 722, (2,))
-sparse_input_2496 = torch.randn((2, 8, 624, 624))
-dense_input_2496 = torch.randn((2, 8, 624, 624))
-dense_input_4996 = torch.randn((2, 8, 624, 624))
+hrrr_input_2496 = torch.randn((2, 617, 624, 624))
+hrrr_stale_state = torch.randn((2, 1, 624, 624))
+input_2496 = torch.randn((2, 39, 624, 624))
+input_4996 = torch.randn((2, 17, 624, 624))
 
 # targets
 
@@ -74,9 +74,10 @@ hrrr_target = torch.randn(2, 617, 128, 128)
 
 total_loss, loss_breakdown = metnet3(
     lead_times = lead_times,
-    sparse_input_2496 = sparse_input_2496,
-    dense_input_2496 = dense_input_2496,
-    dense_input_4996 = dense_input_4996,
+    hrrr_input_2496 = hrrr_input_2496,
+    hrrr_stale_state = hrrr_stale_state,
+    input_2496 = input_2496,
+    input_4996 = input_4996,
     precipitation_targets = precipitation_targets,
     surface_targets = surface_targets,
     hrrr_target = hrrr_target
@@ -88,12 +89,14 @@ total_loss.backward()
 
 metnet3.eval()
 
-surface_targets, hrrr_target, precipitation_targets = metnet3(
+surface_preds, hrrr_pred, precipitation_preds = metnet3(
     lead_times = lead_times,
-    sparse_input_2496 = sparse_input_2496,
-    dense_input_2496 = dense_input_2496,
-    dense_input_4996 = dense_input_4996
+    hrrr_input_2496 = hrrr_input_2496,
+    hrrr_stale_state = hrrr_stale_state,
+    input_2496 = input_2496,
+    input_4996 = input_4996,
 )
+
 
 # Dict[str, Tensor], Tensor, Dict[str, Tensor]
 ```
@@ -103,8 +106,8 @@ surface_targets, hrrr_target, precipitation_targets = metnet3(
 - [x] figure out all the cross entropy and MSE losses
 - [x] auto-handle normalization across all the channels of the HRRR by tracking a running mean and variance of targets during training (using sync batchnorm as hack)
 - [x] allow researcher to pass in their own normalization variables for HRRR
+- [x] build all the inputs to spec, also make sure hrrr input is normalized, offer option to unnormalize hrrr predictions
 
-- [ ] build all the inputs to spec, also make sure hrrr input is normalized, offer option to unnormalize hrrr predictions
 - [ ] make sure model can be easily saved and loaded, with different ways of handling hrrr norm
 - [ ] figure out the topological embedding, consult a neural weather researcher
 
