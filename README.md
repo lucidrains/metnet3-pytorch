@@ -104,6 +104,8 @@ surface_targets, hrrr_target, precipitation_targets = metnet3(
 - [x] auto-handle normalization across all the channels of the HRRR by tracking a running mean and variance of targets during training (using sync batchnorm as hack)
 - [x] allow researcher to pass in their own normalization variables for HRRR
 
+- [ ] build all the inputs to spec, also make sure hrrr input is normalized, offer option to unnormalize hrrr predictions
+- [ ] make sure model can be easily saved and loaded, with different ways of handling hrrr norm
 - [ ] figure out the topological embedding, consult a neural weather researcher
 
 ## Citations
