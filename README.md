@@ -20,7 +20,7 @@ $ pip install metnet3-pytorch
 
 ```python
 import torch
-from metnet3_pytorch.metnet3_pytorch import MetNet3
+from metnet3_pytorch import MetNet3
 
 metnet3 = MetNet3(
     dim = 512,
@@ -31,18 +31,45 @@ metnet3 = MetNet3(
     sparse_input_2496_channels = 8,
     dense_input_2496_channels = 8,
     dense_input_4996_channels = 8,
-    precipitation_target_channels = 2,
-    surface_target_channels = 6,
-    hrrr_target_channels = 617,
+    precipitation_target_bins = dict(
+        mrms_rate = 512,
+        mrms_accumulation = 512,
+    ),
+    surface_target_bins = dict(
+        omo_temperature = 256,
+        omo_dew_point = 256,
+        omo_wind_speed = 256,
+        omo_wind_component_x = 256,
+        omo_wind_component_y = 256,
+        omo_wind_direction = 180
+    ),
+    hrrr_loss_weight = 10,
+    hrrr_target_channels = 617
 )
+
+# inputs
 
 lead_times = torch.randint(0, 722, (2,))
 sparse_input_2496 = torch.randn((2, 8, 624, 624))
 dense_input_2496 = torch.randn((2, 8, 624, 624))
 dense_input_4996 = torch.randn((2, 8, 624, 624))
 
-precipitation_target = torch.randint(0, 2, (2, 512, 512))
-surface_target = torch.randint(0, 6, (2, 128, 128))
+# targets
+
+precipitation_targets = dict(
+    mrms_rate = torch.randint(0, 512, (2, 512, 512)),
+    mrms_accumulation = torch.randint(0, 512, (2, 512, 512)),
+)
+
+surface_targets = dict(
+    omo_temperature = torch.randint(0, 256, (2, 128, 128)),
+    omo_dew_point = torch.randint(0, 256, (2, 128, 128)),
+    omo_wind_speed = torch.randint(0, 256, (2, 128, 128)),
+    omo_wind_component_x = torch.randint(0, 256, (2, 128, 128)),
+    omo_wind_component_y = torch.randint(0, 256, (2, 128, 128)),
+    omo_wind_direction = torch.randint(0, 180, (2, 128, 128))
+)
+
 hrrr_target = torch.randn(2, 617, 128, 128)
 
 total_loss, loss_breakdown = metnet3(
@@ -50,8 +77,8 @@ total_loss, loss_breakdown = metnet3(
     sparse_input_2496 = sparse_input_2496,
     dense_input_2496 = dense_input_2496,
     dense_input_4996 = dense_input_4996,
-    precipitation_target = precipitation_target,
-    surface_target = surface_target,
+    precipitation_targets = precipitation_targets,
+    surface_targets = surface_targets,
     hrrr_target = hrrr_target
 )
 
@@ -67,7 +94,6 @@ surface_target, hrrr_target, precipitation_target = metnet3(
     dense_input_2496 = dense_input_2496,
     dense_input_4996 = dense_input_4996
 )
-
 ```
 
 ## Todo

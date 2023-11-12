@@ -13,7 +13,7 @@ from einops import rearrange, repeat, reduce, pack, unpack
 from einops.layers.torch import Rearrange, Reduce
 
 from beartype import beartype
-from beartype.typing import Tuple, Union, List, Optional
+from beartype.typing import Tuple, Union, List, Optional, Dict
 
 # helpers
 
@@ -579,6 +579,7 @@ LossBreakdown = namedtuple('LossBreakdown', [
 ])
 
 class MetNet3(Module):
+    @beartype
     def __init__(
         self,
         *,
@@ -597,10 +598,21 @@ class MetNet3(Module):
         dense_input_2496_channels = 8,
         dense_input_4996_channels = 8,
         surface_and_hrrr_target_spatial_size = 128,
-        surface_target_channels = 6,
+        precipitation_target_bins: Dict[str, int] = dict(
+            mrms_rate = 512,
+            mrms_accumulation = 512
+        ),
+        surface_target_bins: Dict[str, int] = dict(
+            omo_temperature = 256,
+            omo_dew_point = 256,
+            omo_wind_speed = 256,
+            omo_wind_component_x = 256,
+            omo_wind_component_y = 256,
+            omo_wind_direction = 180
+        ),
         hrrr_target_channels = 617,
         hrrr_norm_statistics: Optional[Tensor] = None,
-        precipitation_target_channels = 2,
+        hrrr_loss_weight = 10,
         crop_size_post_16km = 48,
         resnet_block_depth = 2,
     ):
@@ -688,20 +700,38 @@ class MetNet3(Module):
             cond_dim = lead_time_embed_dim
         )
 
-        self.to_surface_pred = Sequential(
+        # following section b.1
+
+        # targets 1km (mrms)
+
+        self.precipitation_bin_names = tuple(precipitation_target_bins.keys())
+        self.precipitation_bin_dims = tuple(precipitation_target_bins.values())
+
+        self.to_precipitation_bins = Sequential(
             ChanLayerNorm(dim),
-            nn.Conv2d(dim, surface_target_channels, 1)
+            nn.Conv2d(dim, sum(self.precipitation_bin_dims), 1)
         )
+
+        # targets 4km (omo)
+
+        self.surface_bin_names = tuple(surface_target_bins.keys())
+        self.surface_bin_dims = tuple(surface_target_bins.values())
+
+        self.to_surface_bins = Sequential(
+            ChanLayerNorm(dim),
+            nn.Conv2d(dim, sum(self.surface_bin_dims), 1)
+        )
+
+        # to hrrr channels for MSE loss
 
         self.to_hrrr_pred = Sequential(
             ChanLayerNorm(dim),
             nn.Conv2d(dim, hrrr_target_channels, 1)
         )
 
-        self.to_precipitation_pred = Sequential(
-            ChanLayerNorm(dim),
-            nn.Conv2d(dim, precipitation_target_channels, 1)
-        )
+        # they scale hrrr loss by 10. but also divided by number of channels
+
+        self.hrrr_loss_weight = hrrr_loss_weight / hrrr_target_channels
 
         self.has_hrrr_norm_statistics = exists(hrrr_norm_statistics)
 
@@ -713,15 +743,16 @@ class MetNet3(Module):
 
         self.mse_loss_scaler = LossScaler()
 
+    @beartype
     def forward(
         self,
         lead_times,
         sparse_input_2496,
         dense_input_2496,
         dense_input_4996,
-        surface_target = None,
-        hrrr_target = None,
-        precipitation_target = None
+        surface_targets: Optional[Dict[str, Tensor]] = None,
+        precipitation_targets: Optional[Dict[str, Tensor]] = None,
+        hrrr_target: Optional[Tensor] = None,
     ):
         batch = lead_times.shape[0]
 
@@ -767,40 +798,72 @@ class MetNet3(Module):
 
         x = self.crop_post_4km(x)
 
-        surface_pred = self.to_surface_pred(x)
         hrrr_pred = self.to_hrrr_pred(x)
+
+        surface_bins = self.to_surface_bins(x).split(self.surface_bin_dims, dim = 1)
+
+        surface_preds = dict(zip(self.surface_bin_names, surface_bins))
 
         x = self.upsample_4x_to_1km(x)
 
         x = self.resnet_blocks_up_1km(x, cond = cond)
 
-        precipitation_pred = self.to_precipitation_pred(x)
+        precipitation_bins = self.to_precipitation_bins(x).split(self.precipitation_bin_dims, dim = 1)
 
-        exist_targets = [exists(target) for target in (surface_target, hrrr_target, precipitation_target)]
+        precipitation_preds = dict(zip(self.precipitation_bin_names, precipitation_bins))
 
-        pred =  Predictions(surface_pred, hrrr_pred, precipitation_pred)
+        exist_targets = [exists(target) for target in (surface_targets, hrrr_target, precipitation_targets)]
+
+        pred =  Predictions(surface_preds, hrrr_pred, precipitation_preds)
 
         if not any(exist_targets):
             return pred
 
         assert all(exist_targets), 'all targets must be passed in for loss calculation'
 
-        assert batch == surface_target.shape[0] == hrrr_target.shape[0] == precipitation_target.shape[0]
-
-        assert surface_target.shape[1:] == self.surface_target_shape
         assert hrrr_target.shape[1:] == self.hrrr_target_shape
-        assert precipitation_target.shape[1:] == self.precipitation_target_shape
+
+        assert set(self.surface_bin_names) == set(surface_targets.keys())
+
+        assert set(self.precipitation_bin_names) == set(precipitation_targets.keys())
 
         # calculate categorical losses
 
-        surface_pred = rearrange(surface_pred, '... h w -> ... (h w)')
-        precipitation_pred = rearrange(precipitation_pred, '... h w -> ... (h w)')
+        ce_losses = 0.
 
-        surface_target = rearrange(surface_target, '... h w -> ... (h w)')
-        precipitation_target = rearrange(precipitation_target, '... h w -> ... (h w)')
+        surface_loss_breakdown = dict()
+        precipitation_loss_breakdown = dict()
 
-        surface_loss = F.cross_entropy(surface_pred, surface_target)
-        precipition_loss = F.cross_entropy(precipitation_pred, precipitation_target)
+        for surface_bin_name in self.surface_bin_names:
+            surface_pred = surface_preds[surface_bin_name]
+            surface_target = surface_targets[surface_bin_name]
+
+            assert surface_target.shape[0] == batch
+            assert surface_target.shape[1:] == self.surface_target_shape
+
+            surface_pred = rearrange(surface_pred, '... h w -> ... (h w)')
+            surface_target = rearrange(surface_target, '... h w -> ... (h w)')
+            surface_loss = F.cross_entropy(surface_pred, surface_target)
+
+            surface_loss_breakdown[surface_bin_name] = surface_loss
+
+            ce_losses = ce_losses + surface_loss
+
+        for precipitation_bin_name in self.precipitation_bin_names:
+            precipitation_pred = precipitation_preds[precipitation_bin_name]
+            precipitation_target = precipitation_targets[precipitation_bin_name]
+
+            assert precipitation_target.shape[0] == batch
+            assert precipitation_target.shape[1:] == self.precipitation_target_shape
+
+            precipitation_pred = rearrange(precipitation_pred, '... h w -> ... (h w)')
+            precipitation_target = rearrange(precipitation_target, '... h w -> ... (h w)')
+
+            precipition_loss = F.cross_entropy(precipitation_pred, precipitation_target)
+
+            precipitation_loss_breakdown[precipitation_bin_name] = precipition_loss
+
+            ce_losses = ce_losses + precipition_loss
 
         # calculate HRRR mse loss
 
@@ -830,8 +893,8 @@ class MetNet3(Module):
 
         # total loss
 
-        total_loss = hrrr_loss + precipition_loss + surface_loss
+        total_loss = ce_losses + hrrr_loss * self.hrrr_loss_weight
 
-        loss_breakdown = LossBreakdown(surface_loss, hrrr_loss, precipition_loss)
+        loss_breakdown = LossBreakdown(surface_loss_breakdown, hrrr_loss, precipitation_loss_breakdown)
 
         return total_loss, loss_breakdown
