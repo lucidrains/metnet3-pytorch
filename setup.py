@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'metnet3-pytorch',
   packages = find_packages(exclude=[]),
-  version = '0.0.9',
+  version = '0.0.11',
   license='MIT',
   description = 'MetNet 3 - Pytorch',
   author = 'Phil Wang',

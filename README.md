@@ -1,6 +1,6 @@
 <img src="./metnet3.png" width="450px"></img>
 
-## MetNet-3 - Pytorch (wip)
+## MetNet-3 - Pytorch
 
 Implementation of <a href="https://blog.research.google/2023/11/metnet-3-state-of-art-neural-weather.html">MetNet 3</a>, SOTA neural weather model out of Google Deepmind, in Pytorch
 
@@ -43,7 +43,9 @@ metnet3 = MetNet3(
         omo_wind_component_y = 256,
         omo_wind_direction = 180
     ),
-    hrrr_loss_weight = 10
+    hrrr_loss_weight = 10,
+    hrrr_norm_strategy = 'sync_batchnorm',  # this would use a sync batchnorm to normalize the input hrrr and target, without having to precalculate the mean and variance of the hrrr dataset per channel
+    hrrr_norm_statistics = None             # you can also also set `hrrr_norm_strategy = "precalculated"` and pass in the mean and variance as shape `(2, 617)` through this keyword argument
 )
 
 # inputs
@@ -107,8 +109,8 @@ surface_preds, hrrr_pred, precipitation_preds = metnet3(
 - [x] auto-handle normalization across all the channels of the HRRR by tracking a running mean and variance of targets during training (using sync batchnorm as hack)
 - [x] allow researcher to pass in their own normalization variables for HRRR
 - [x] build all the inputs to spec, also make sure hrrr input is normalized, offer option to unnormalize hrrr predictions
+- [x] make sure model can be easily saved and loaded, with different ways of handling hrrr norm
 
-- [ ] make sure model can be easily saved and loaded, with different ways of handling hrrr norm
 - [ ] figure out the topological embedding, consult a neural weather researcher
 
 ## Citations
