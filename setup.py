@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'metnet3-pytorch',
   packages = find_packages(exclude=[]),
-  version = '0.0.11',
+  version = '0.0.12',
   license='MIT',
   description = 'MetNet 3 - Pytorch',
   author = 'Phil Wang',
@@ -20,7 +20,7 @@ setup(
   install_requires=[
     'beartype',
     'einops>=0.7.0',
-    'torch>=1.6',
+    'torch>=2.0',
   ],
   classifiers=[
     'Development Status :: 4 - Beta',

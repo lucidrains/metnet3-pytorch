@@ -1,7 +1,7 @@
 from pathlib import Path
-from contextlib import contextmanager
 from functools import partial
 from collections import namedtuple
+from contextlib import contextmanager
 
 import torch
 from torch import nn, Tensor, einsum
@@ -37,6 +37,11 @@ def cast_tuple(val, length = 1):
 
 def safe_div(num, den, eps = 1e-10):
     return num / den.clamp(min = eps)
+
+# tensor helpers
+
+def l2norm(t):
+    return F.normalize(t, dim = -1)
 
 # prepare batch norm in maxvit for distributed training
 
@@ -327,6 +332,91 @@ def MBConv(
     return net
 
 # attention related classes
+
+class XCAttention(Module):
+    """
+    this specific linear attention was proposed in https://arxiv.org/abs/2106.09681 (El-Nouby et al.)
+    """
+
+    @beartype
+    def __init__(
+        self,
+        *,
+        dim,
+        cond_dim: Optional[int] = None,
+        dim_head = 32,
+        heads = 8,
+        scale = 8,
+        flash = False,
+        dropout = 0.
+    ):
+        super().__init__()
+        dim_inner = dim_head * heads
+
+        self.has_cond = exists(cond_dim)
+
+        self.film = None
+
+        if self.has_cond:
+            self.film = Sequential(
+                nn.Linear(cond_dim, dim * 2),
+                nn.SiLU(),
+                nn.Linear(dim * 2, dim * 2),
+                Rearrange('b (r d) -> r b 1 d', r = 2)
+            )
+
+        self.norm = nn.LayerNorm(dim, elementwise_affine = not self.has_cond)
+
+        self.to_qkv = Sequential(
+            nn.Linear(dim, dim_inner * 3, bias = False),
+            Rearrange('b n (qkv h d) -> qkv b h d n', qkv = 3, h = heads)
+        )
+
+        self.scale = scale
+
+        self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
+
+        self.attn_dropout = nn.Dropout(dropout)
+
+        self.to_out = Sequential(
+            Rearrange('b h d n -> b n (h d)'),
+            nn.Linear(dim_inner, dim)
+        )
+
+    def forward(
+        self,
+        x,
+        cond: Optional[Tensor] = None
+    ):
+        x = rearrange(x, 'b c h w -> b h w c')
+        x, ps = pack_one(x, 'b * c')
+
+        x = self.norm(x)
+
+        # conditioning
+
+        if exists(self.film):
+            assert exists(cond)
+
+            gamma, beta = self.film(cond)
+            x = x * gamma + beta
+
+        # cosine sim linear attention
+
+        q, k, v = self.to_qkv(x)
+
+        q, k = map(l2norm, (q, k))
+        q = q * self.temperature.exp()
+
+        sim = einsum('b h i n, b h j n -> b h i j', q, k) * self.scale
+        attn = sim.softmax(dim = -1)
+
+        out = einsum('b h i j, b h j n -> b h i n', attn, v)
+
+        out = self.to_out(out)
+
+        out = unpack_one(out, ps, 'b * c')
+        return rearrange(out, 'b h w c -> b c h w')
 
 class Attention(Module):
     def __init__(
@@ -656,6 +746,14 @@ class MetNet3(Module):
             depth = resnet_block_depth
         )
 
+        self.linear_attn_4km = XCAttention(
+            dim = dim,
+            cond_dim = lead_time_embed_dim,
+            dim_head = attn_dim_head,
+            heads = attn_heads,
+            dropout = attn_dropout
+        )
+
         self.downsample_and_pad_to_8km = Sequential(
             Downsample2x(),
             CenterPad(input_spatial_size)
@@ -695,6 +793,11 @@ class MetNet3(Module):
             dim_in = dim + dim_in_8km,
             cond_dim = lead_time_embed_dim,
             depth = resnet_block_depth
+        )
+
+        self.linear_attn_8km = XCAttention(
+            dim = dim,
+            cond_dim = lead_time_embed_dim
         )
 
         self.upsample_8km_to_4km = Upsample2x(dim)
@@ -863,6 +966,8 @@ class MetNet3(Module):
 
         x = self.resnet_blocks_down_4km(x, cond = cond)
 
+        x = self.linear_attn_4km(x, cond = cond) + x
+
         x = self.downsample_and_pad_to_8km(x)
 
         x = torch.cat((input_4996, x), dim = 1)
@@ -882,6 +987,8 @@ class MetNet3(Module):
         x = torch.cat((skip_connect_8km, x), dim = 1)
 
         x = self.resnet_blocks_up_8km(x, cond = cond)
+
+        x = self.linear_attn_8km(x, cond = cond) + x
 
         x = self.upsample_8km_to_4km(x)
 
